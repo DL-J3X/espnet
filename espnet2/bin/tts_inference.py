@@ -17,6 +17,7 @@ from typing import Sequence
 from typing import Tuple
 from typing import Union
 
+import matplotlib
 import numpy as np
 import soundfile as sf
 import torch
@@ -77,6 +78,9 @@ class Text2Speech:
         train_config: Union[Path, str] = None,
         model_file: Union[Path, str] = None,
         threshold: float = 0.5,
+        perturb_spembs: bool = False,
+        perturb_factor: float = 1.0,
+        direct_perturb: bool = False,
         minlenratio: float = 0.0,
         maxlenratio: float = 10.0,
         use_teacher_forcing: bool = False,
@@ -143,7 +147,12 @@ class Text2Speech:
                 backward_window=backward_window,
             )
         if isinstance(self.tts, (FastSpeech, FastSpeech2, VITS)):
-            decode_conf.update(alpha=speed_control_alpha)
+            decode_conf.update(
+                alpha=speed_control_alpha,
+                perturb_spembs=perturb_spembs,
+                perturb_factor=perturb_factor,
+                direct_perturb=direct_perturb,
+            )
         if isinstance(self.tts, VITS):
             decode_conf.update(
                 noise_scale=noise_scale,
@@ -158,6 +167,7 @@ class Text2Speech:
         speech: Union[torch.Tensor, np.ndarray] = None,
         durations: Union[torch.Tensor, np.ndarray] = None,
         spembs: Union[torch.Tensor, np.ndarray] = None,
+        tgt_spembs: Union[torch.Tensor, np.ndarray] = None,
         sids: Union[torch.Tensor, np.ndarray] = None,
         lids: Union[torch.Tensor, np.ndarray] = None,
         decode_conf: Optional[Dict[str, Any]] = None,
@@ -185,6 +195,8 @@ class Text2Speech:
             batch.update(durations=durations)
         if spembs is not None:
             batch.update(spembs=spembs)
+        if tgt_spembs is not None:
+            batch.update(tgt_spembs=tgt_spembs)
         if sids is not None:
             batch.update(sids=sids)
         if lids is not None:
@@ -324,6 +336,9 @@ def inference(
     model_file: Optional[str],
     model_tag: Optional[str],
     threshold: float,
+    perturb_spembs: bool,
+    perturb_factor: float,
+    direct_perturb: bool,
     minlenratio: float,
     maxlenratio: float,
     use_teacher_forcing: bool,
@@ -363,6 +378,9 @@ def inference(
         train_config=train_config,
         model_file=model_file,
         threshold=threshold,
+        perturb_spembs=perturb_spembs,
+        perturb_factor=perturb_factor,
+        direct_perturb=direct_perturb,
         maxlenratio=maxlenratio,
         minlenratio=minlenratio,
         use_teacher_forcing=use_teacher_forcing,
@@ -414,8 +432,6 @@ def inference(
     (output_dir / "focus_rates").mkdir(parents=True, exist_ok=True)
 
     # Lazy load to avoid the backend error
-    import matplotlib
-
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator
@@ -670,6 +686,24 @@ def get_parser():
         type=float,
         default=0.5,
         help="Threshold value in decoding",
+    )
+    group.add_argument(
+        "--perturb_spembs",
+        type=str2bool,
+        default=False,
+        help="Whether to perturb speaker embeddings",
+    )
+    group.add_argument(
+        "--perturb_factor",
+        type=float,
+        default=1.0,
+        help="perturbation variance",
+    )
+    group.add_argument(
+        "--direct_perturb",
+        type=str2bool,
+        default=False,
+        help="direct perturb on spembs (False, will perturb across time domain)"
     )
     group.add_argument(
         "--use_att_constraint",
