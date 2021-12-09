@@ -621,9 +621,13 @@ class FastSpeech2(AbsTTS):
         ps: Optional[torch.Tensor] = None,
         es: Optional[torch.Tensor] = None,
         spembs: Optional[torch.Tensor] = None,
+        tgt_spembs: Optional[torch.Tensor] = None,
         sids: Optional[torch.Tensor] = None,
         lids: Optional[torch.Tensor] = None,
         is_inference: bool = False,
+        perturb_spembs: bool = False,
+        perturb_factor: float = 1.0,
+        direct_perturb: bool = False,
         alpha: float = 1.0,
     ) -> Sequence[torch.Tensor]:
         # forward encoder
@@ -645,7 +649,7 @@ class FastSpeech2(AbsTTS):
 
         # integrate speaker embedding
         if self.spk_embed_dim is not None:
-            hs = self._integrate_with_spk_embed(hs, spembs)
+            hs = self._integrate_with_spk_embed(hs, spembs, tgt_spembs, perturb_spembs, perturb_factor, direct_perturb)
 
         # forward duration predictor and variance predictors
         d_masks = make_pad_mask(ilens).to(xs.device)
@@ -704,10 +708,14 @@ class FastSpeech2(AbsTTS):
         feats: Optional[torch.Tensor] = None,
         durations: Optional[torch.Tensor] = None,
         spembs: torch.Tensor = None,
+        tgt_spembs: torch.Tensor = None,
         sids: Optional[torch.Tensor] = None,
         lids: Optional[torch.Tensor] = None,
         pitch: Optional[torch.Tensor] = None,
         energy: Optional[torch.Tensor] = None,
+        perturb_spembs: bool = False,
+        perturb_factor: float = 1.0,
+        direct_perturb: bool = False,
         alpha: float = 1.0,
         use_teacher_forcing: bool = False,
     ) -> Dict[str, torch.Tensor]:
@@ -718,6 +726,7 @@ class FastSpeech2(AbsTTS):
             feats (Optional[Tensor): Feature sequence to extract style (N, idim).
             durations (Optional[Tensor): Groundtruth of duration (T_text + 1,).
             spembs (Optional[Tensor): Speaker embedding vector (spk_embed_dim,).
+            tgt_spembs (Optional[Tensor): Target speaker embedding vector (spk_embed_dim,).
             sids (Optional[Tensor]): Speaker ID (1,).
             lids (Optional[Tensor]): Language ID (1,).
             pitch (Optional[Tensor]): Groundtruth of token-avg pitch (T_text + 1, 1).
@@ -747,6 +756,8 @@ class FastSpeech2(AbsTTS):
             ys = y.unsqueeze(0)
         if spemb is not None:
             spembs = spemb.unsqueeze(0)
+        if tgt_spembs is not None:
+            tgt_spembs = tgt_spembs.unsqueeze(0)
 
         if use_teacher_forcing:
             # use groundtruth of duration, pitch, and energy
@@ -759,8 +770,12 @@ class FastSpeech2(AbsTTS):
                 ps=ps,
                 es=es,
                 spembs=spembs,
+                tgt_spembs=tgt_spembs,
                 sids=sids,
                 lids=lids,
+                perturb_spembs=perturb_spembs,
+                perturb_factor=perturb_factor,
+                direct_perturb=direct_perturb,
             )  # (1, T_feats, odim)
         else:
             _, outs, d_outs, p_outs, e_outs = self._forward(
@@ -768,6 +783,10 @@ class FastSpeech2(AbsTTS):
                 ilens,
                 ys,
                 spembs=spembs,
+                tgt_spembs=tgt_spembs,
+                perturb_spembs=perturb_spembs,
+                perturb_factor=perturb_factor,
+                direct_perturb=direct_perturb,
                 sids=sids,
                 lids=lids,
                 is_inference=True,
@@ -782,7 +801,9 @@ class FastSpeech2(AbsTTS):
         )
 
     def _integrate_with_spk_embed(
-        self, hs: torch.Tensor, spembs: torch.Tensor
+        self, hs: torch.Tensor, spembs: torch.Tensor, 
+        tgt_spembs: torch.Tensor, perturb_spembs: bool = False,
+        perturb_factor: float = 1.0, direct_perturb: bool = False,
     ) -> torch.Tensor:
         """Integrate speaker embedding with hidden states.
 
@@ -794,13 +815,37 @@ class FastSpeech2(AbsTTS):
             Tensor: Batch of integrated hidden state sequences (B, T_text, adim).
 
         """
+        if tgt_spembs is not None:
+            spembs = F.normalize(spembs, dim=-1)
+            tgt_spembs = F.normalize(tgt_spembs, dim=-1)
+            diff_unit = tgt_spembs - spembs / hs.size(1) * 3
+            inter = []
+            for i in range(hs.size(1)):
+                # inter.append(spembs + diff_unit * i)
+                if i > 2 * hs.size(1) // 3:
+                    inter.append(tgt_spembs)
+                elif i > hs.size(1) // 3:
+                    inter.append(spembs + diff_unit * (i - hs.size(1) // 3))
+                else:
+                    inter.append(spembs)
+            spembs = F.normalize(torch.stack(inter, dim=1), dim=2)
+        elif perturb_spembs and not direct_perturb:
+            spembs = spembs.unsqueeze(1).expand(-1, hs.size(1), -1)
+            perturb_factor = torch.normal(0, perturb_factor, size=spembs.size())
+            spembs = F.normalize(spembs + perturb_factor, dim=2)
+            # spembs = F.normalize(spembs, dim=2)
+        elif perturb_spembs:
+            spembs = F.normalize(spembs + torch.normal(0, perturb_factor, size=spembs.size())).unsqueeze(1).expand(-1, hs.size(1), -1)
+        else:
+            spembs = F.normalize(spembs).unsqueeze(1).expand(-1, hs.size(1), -1)
+
         if self.spk_embed_integration_type == "add":
             # apply projection and then add to hidden states
-            spembs = self.projection(F.normalize(spembs))
-            hs = hs + spembs.unsqueeze(1)
+            # spembs = self.projection(F.normalize(spembs))
+            hs = hs + self.projection(spembs)
         elif self.spk_embed_integration_type == "concat":
             # concat hidden states with spk embeds and then apply projection
-            spembs = F.normalize(spembs).unsqueeze(1).expand(-1, hs.size(1), -1)
+            # spembs = F.normalize(spembs).unsqueeze(1).expand(-1, hs.size(1), -1)
             hs = self.projection(torch.cat([hs, spembs], dim=-1))
         else:
             raise NotImplementedError("support only add or concat.")
