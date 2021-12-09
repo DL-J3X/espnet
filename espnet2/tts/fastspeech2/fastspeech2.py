@@ -804,6 +804,7 @@ class FastSpeech2(AbsTTS):
         self, hs: torch.Tensor, spembs: torch.Tensor, 
         tgt_spembs: torch.Tensor, perturb_spembs: bool = False,
         perturb_factor: float = 1.0, direct_perturb: bool = False,
+        cocktail_method: str = "hard"
     ) -> torch.Tensor:
         """Integrate speaker embedding with hidden states.
 
@@ -818,16 +819,26 @@ class FastSpeech2(AbsTTS):
         if tgt_spembs is not None:
             spembs = F.normalize(spembs, dim=-1)
             tgt_spembs = F.normalize(tgt_spembs, dim=-1)
-            diff_unit = tgt_spembs - spembs / hs.size(1) * 3
+            if method == "three_stage":
+                diff_unit = (tgt_spembs - spembs) / hs.size(1) * 3
+            elif method == "gradual":
+                diff_unit = (tgt_spembs - spembs) / hs.size(1)
             inter = []
             for i in range(hs.size(1)):
-                # inter.append(spembs + diff_unit * i)
-                if i > 2 * hs.size(1) // 3:
-                    inter.append(tgt_spembs)
-                elif i > hs.size(1) // 3:
-                    inter.append(spembs + diff_unit * (i - hs.size(1) // 3))
-                else:
-                    inter.append(spembs)
+                if method == "three_stage":
+                    if i > 2 * hs.size(1) // 3:
+                        inter.append(tgt_spembs)
+                    elif i > hs.size(1) // 3:
+                        inter.append(spembs + diff_unit * (i - hs.size(1) // 3))
+                    else:
+                        inter.append(spembs)
+                elif method == "gradual":
+                    inter.append(spembs + diff_unit * i)
+                elif method == "hard":
+                    if i > hs.size(1) // 2:
+                        inter.append(tgt_spembs)
+                    else:
+                        inter.append(spembs)
             spembs = F.normalize(torch.stack(inter, dim=1), dim=2)
         elif perturb_spembs and not direct_perturb:
             spembs = spembs.unsqueeze(1).expand(-1, hs.size(1), -1)
